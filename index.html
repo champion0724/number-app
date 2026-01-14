@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>數字偵測器</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 20px; }
+        video { width: 90%; max-width: 400px; border: 1px solid #ccc; background: #000; }
+        canvas { display: none; } /* 用於內部處理，不顯示 */
+        #output { margin-top: 10px; font-size: 1.2em; }
+        #thresholdInput { margin: 10px 0; padding: 5px; font-size: 1em; }
+        button { padding: 10px 20px; font-size: 1em; margin-top: 10px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>數字偵測器</h1>
+
+    <p>設定一個閾值，當偵測到的數字小於此值時會發出聲音。</p>
+    <label for="thresholdInput">閾值：</label>
+    <input type="number" id="thresholdInput" value="50" min="0">
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+    
+    <p>目前偵測到的數字: <span id="output">等待中...</span></p>
+    <p>通知狀態: <span id="notificationStatus">未啟動</span></p>
+
+    <button id="startButton">啟動相機與偵測</button>
+    <button id="stopButton" disabled>停止</button>
+
+    <script src='https://unpkg.com/tesseract.js@4.0.0/dist/tesseract.min.js'></script>
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const context = canvas.getContext('2d');
+        const outputSpan = document.getElementById('output');
+        const thresholdInput = document.getElementById('thresholdInput');
+        const notificationStatusSpan = document.getElementById('notificationStatus');
+        const startButton = document.getElementById('startButton');
+        const stopButton = document.getElementById('stopButton');
+
+        let intervalId;
+        let worker; // Tesseract worker
+        let isProcessing = false; // 防止重複處理
+        let notificationSound;
+
+        // 創建一個簡單的聲音
+        function createSound() {
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.type = 'sine'; // 正弦波
+            oscillator.frequency.value = 440; // 440 Hz
+            gainNode.gain.setValueAtTime(0, audioCtx.currentTime); // 開始時音量為0
+
+            oscillator.start();
+
+            return {
+                play: function() {
+                    gainNode.gain.cancelScheduledValues(audioCtx.currentTime);
+                    gainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+                    gainNode.gain.linearRampToValueAtTime(0.5, audioCtx.currentTime + 0.05); // 淡入
+                    gainNode.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.5); // 淡出
+                }
+            };
+        }
+
+        // 啟動相機
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); // 優先使用後置鏡頭
+                video.srcObject = stream;
+                return new Promise((resolve) => {
+                    video.onloadedmetadata = () => {
+                        video.play();
+                        resolve();
+                    };
+                });
+            } catch (err) {
+                console.error('無法訪問相機:', err);
+                outputSpan.textContent = '無法訪問相機，請檢查權限。';
+            }
+        }
+
+        // 處理影片幀並識別數字
+        async function processFrame() {
+            if (isProcessing) return;
+            isProcessing = true;
+
+            try {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+                const { data: { text } } = await worker.recognize(canvas, 'eng', {
+                    logger: m => console.log(m) // 顯示Tesseract的處理訊息
+                });
+
+                const numbers = text.match(/\d+/g); // 從文本中提取所有數字
+                let detectedNumber = null;
+
+                if (numbers && numbers.length > 0) {
+                    detectedNumber = parseInt(numbers[0], 10); // 假設第一個數字是我們需要的
+                    outputSpan.textContent = detectedNumber;
+
+                    const threshold = parseInt(thresholdInput.value, 10);
+                    if (detectedNumber < threshold) {
+                        notificationStatusSpan.textContent = `偵測到數字 ${detectedNumber} 小於閾值 ${threshold}，發出通知！`;
+                        if (notificationSound) {
+                            notificationSound.play();
+                        } else {
+                            // 如果聲音還沒創建，則創建並播放
+                            notificationSound = createSound();
+                            notificationSound.play();
+                        }
+                    } else {
+                        notificationStatusSpan.textContent = '數字大於或等於閾值。';
+                    }
+                } else {
+                    outputSpan.textContent = '未偵測到數字';
+                    notificationStatusSpan.textContent = '未偵測到數字。';
+                }
+
+            } catch (err) {
+                console.error('OCR 處理錯誤:', err);
+                outputSpan.textContent = 'OCR 處理錯誤';
+                notificationStatusSpan.textContent = 'OCR 處理錯誤。';
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+        // 啟動按鈕事件
+        startButton.addEventListener('click', async () => {
+            startButton.disabled = true;
+            outputSpan.textContent = '載入 OCR 引擎...';
+
+            if (!worker) {
+                // 初始化 Tesseract Worker
+                worker = await Tesseract.createWorker('eng', 1, {
+                    // logger: m => console.log(m) // 顯示Tesseract的載入訊息
+                });
+            }
+            outputSpan.textContent = 'OCR 引擎已載入，啟動相機...';
+            
+            await startCamera();
+            if (video.srcObject) { // 確保相機已啟動
+                outputSpan.textContent = '相機已啟動，開始偵測數字...';
+                notificationStatusSpan.textContent = '偵測中...';
+                intervalId = setInterval(processFrame, 2000); // 每2秒偵測一次
+                stopButton.disabled = false;
+            } else {
+                startButton.disabled = false; // 如果相機啟動失敗，重新啟用啟動按鈕
+            }
+        });
+
+        // 停止按鈕事件
+        stopButton.addEventListener('click', () => {
+            clearInterval(intervalId);
+            if (worker) {
+                worker.terminate(); // 終止 Tesseract Worker
+                worker = null;
+            }
+            const stream = video.srcObject;
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop()); // 停止相機軌道
+            }
+            video.srcObject = null;
+            outputSpan.textContent = '已停止';
+            notificationStatusSpan.textContent = '未啟動';
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            isProcessing = false;
+        });
+
+        // 頁面卸載時停止相機和Worker
+        window.addEventListener('beforeunload', () => {
+            if (intervalId) {
+                clearInterval(intervalId);
+            }
+            if (worker) {
+                worker.terminate();
+            }
+            const stream = video.srcObject;
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+        });
+    </script>
+</body>
+</html>
